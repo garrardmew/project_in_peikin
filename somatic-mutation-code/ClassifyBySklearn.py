@@ -1,6 +1,5 @@
 #!/data2/wangb/bin/python3
 # coding=utf-8
-# author:liuxj
 '''
 Created on 20190318
 Reference: 
@@ -160,6 +159,21 @@ Output in current dir.
 20190816
     Automatically do exp(x) if a dataframe have values less than 0. 
 
+20191017
+    Going to create VotingClassifier when receiving -m params that contains ','. 
+
+20191206
+    Change the output format of the predicted result by the existing predictor, i.e. delete the folder name to prevent long prefix name. 
+
+20200110
+    Add the normalization method. Changing the do_normalize from True/False to a initiated method object (str), for example, "Normalier(norm='l1')". 
+
+20200117
+    Shorten the output prefix by using simpler separation symbols. 
+
+20200213
+    Modify the output prefix sep symbols from = and , to + and ..
+    Modify the test data demonstration: only output the table for the predictable samples. The LOW_CONFIDENCE samples will not be output. (DELETE_FILTERED as the parameter)  
 '''
 # Load libraries
 import os
@@ -180,8 +194,9 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.neural_network import MLPClassifier
 from sklearn.tree import DecisionTreeClassifier
 from sklearn.preprocessing import PolynomialFeatures
-from sklearn.preprocessing import Normalizer
+from sklearn.preprocessing import *
 from sklearn.preprocessing import label_binarize
+from numpy import inf
 from sklearn.model_selection import cross_val_score, cross_val_predict
 
 import numpy as np
@@ -201,12 +216,22 @@ import matplotlib
 # matplotlib.rc('font',**font) 
 from matplotlib.font_manager import FontManager
 from matplotlib.font_manager import FontProperties
-#matplotlib使用中文字体
-arial_font_path = '/data2/wangb/anaconda2/envs/tensorflow/lib/python3.6/site-packages/matplotlib/mpl-data/fonts/ttf/Arial.ttf'
+
+arial_font_path = '/data2/wangb/fonts/msfonts/Arial.TTF'
 if os.path.exists(arial_font_path):
     arial_font_properties = FontProperties(fname=arial_font_path)
 else:
     arial_font_properties = None
+
+
+# SEP_BETWEEN_OPTIONS = ','
+# SEP_BETWEEN_OPTION_VALUE = '='
+SEP_BETWEEN_OPTIONS = '+'
+SEP_BETWEEN_OPTION_VALUE = '.'
+
+# If true, the LOW_CONFIDENCE samples will be deleted from the result table. 
+DELETE_FILTERED = True
+
 
 
 # from matplotlib import font_manager
@@ -218,7 +243,6 @@ else:
 # print(all_fonts)
 # quit()
 from matplotlib import pyplot as plt
-#画图，插值
 from scipy import interp
 from itertools import cycle
 # from MDNNClassifier import DNN
@@ -229,7 +253,13 @@ import argparse
 KEEP_DECIMAL = 4 
 WRITE_TO_DISK_PREFIX_MAX_LENGTH = 240
 
-
+class AsIs():
+    def __init__(self):
+        pass
+    def fit(self, X):
+        pass
+    def transform(self, X):
+        return X 
 
 PredictorClasses = {
     'svm':SVC,
@@ -241,10 +271,7 @@ PredictorClasses = {
     'xgboost':XGBClassifier,
     'gb':GradientBoostingClassifier,
     }
-
-#return predictor_instance, prefix,返回分类器（带参数）和
 def createNewPredictorInstance(**kargs):
-    # *args,将参数打包成tuple给函数体调用，**kwargs 打包关键字参数成dict给函数体调用 kargs.get()字典
     method = kargs.get('classification_method', 'svm')
     #  method = 'svm'
 
@@ -254,23 +281,21 @@ def createNewPredictorInstance(**kargs):
     except:
         raise Exception('Classification method not recognized. ')
     
-    #.__code__.arnames将函数局部变量以元组的形式返回 Predictor.__init__调用Predictor(默认SVC)的构造函数
+    
     args_to_init = set(Predictor.__init__.__code__.co_varnames)
-    #以集合的形式返回key
     intersect = args_to_init & set(kargs.keys())
-    #传递的参数，得到字典如method=svm，C(i)=10000(kargs[i])
+    
     paras_to_pass = {i:kargs[i] for i in intersect}    
     print('args to pass:')
     print(paras_to_pass)
     predictor_instance = Predictor(**paras_to_pass)
     
     
-    # For prefix, remove build_fn because it's meaningless for users. 可调用函数或类实例
+    # For prefix, remove build_fn because it's meaningless for users. 
     if 'build_fn' in paras_to_pass:
         paras_to_pass.pop('build_fn')
     prefix = method
-    #paras_to_pass是字典  kernel='rbf' prefix: logistic--C_10000.0
-    prefix += ''.join(sorted(['--{}_{}'.format(k, d) for (k, d) in paras_to_pass.items()]))
+    prefix += ''.join(sorted(['{}{}{}{}'.format(SEP_BETWEEN_OPTIONS, k, SEP_BETWEEN_OPTION_VALUE, d) for (k, d) in paras_to_pass.items()]))
     prefix = prefix.replace(' ', '')
     
 #     prefix = prefix.replace('[','')
@@ -288,27 +313,31 @@ def savePickle(element, path):
         
 def loadPickle(path):
     with open(path, 'rb') as fr:
-        return pickle.load(fr)
+        return pickle.load(fr) 
 
-#return X(dataframe), groups（list）, cols(list)
-def generateFeaturesAndLabels(path_feature_df, path_group, path_chosen_genes="", return_gene_list=False, do_normalize=True, transpose=False):
+def generateFeaturesAndLabels(path_feature_df, path_group, path_chosen_genes="", return_gene_list=False, transpose=False, \
+    do_normalize="Normalizer(norm='l1')",  do_normalize_after_loc="Normalizer(norm='l1')", **kargs):
+    '''
+    do_normalize: a initiated Normalizer from sklearn.preprocessing. Also it could be "AsIs()", leaving the data as is. This is a normalizer before extracting selected genes.
+    do_normalize_after_loc: like the do_normalize, but it's after extracting genes, and do normalize again.  
+    '''
+
     X_df = pd.read_csv(path_feature_df, sep='\t', index_col=0)
     if transpose:
         X_df = X_df.T
     X_df = X_df.fillna(0)
 
-    # Remove the invalid samples. 特征非数字的样本
-    valid_rows = []    
+    # Remove the invalid samples. 
+    valid_rows = []
     for ind in X_df.index:
         if np.issubdtype(X_df.loc[ind,:], np.number):
             valid_rows.append(ind)
-
+            
     # for i in range(len(sums)):
         # if isinstance(sums[i], float):
             # valid_rows.append(i)
     original_shape = X_df.shape
     X_df = X_df.loc[valid_rows,:]
-    #(df3>0).sum()  (df3>0).sum().sum()   取X_df中的值和0比较，第一个sum()计算的事每一列有多少个<0的值，第二个sum（）是所有列中<0的总数
     if (X_df < 0).sum().sum() > 0:
         # Do exp to whole dataframe. 
         from numpy import exp2
@@ -319,32 +348,37 @@ def generateFeaturesAndLabels(path_feature_df, path_group, path_chosen_genes="",
     # print(X_df)
     names = X_df.index
     cols = X_df.columns
-
-    #通过用特征矩阵中的index，从label矩阵中去取得相应的label值，获得标签
+    
     groups = readGroupInfo(names, path_group, file_group_header=None) 
+    
+    if do_normalize:    
+        print('Normalizing (shown only one row): \n{}'.format(sum(X_df.iloc[0,:])))
+        # normalizer = Normalizer(norm='l1')
+        normalizer = eval(do_normalize)
+        print('do_normalize is {}'.format(normalizer))
+        normalizer.fit(X_df)
+        X_tmp = normalizer.transform(X_df)
+        X_df.loc[:,:] = X_tmp
+        print('Normalized as (shown only one row): \n{}'.format(sum(X_df.iloc[0,:])))
 
-    #这里的path_chosen_genes是指通过rf等算法对基因筛选得到的基因文件
+
     if path_chosen_genes and os.path.exists(path_chosen_genes):
         print('Using genes from: {}'.format(path_chosen_genes))
-        #读取第一行，即所有列名，即基因名
         with open(path_chosen_genes) as fr:
-            #  for l in fr.readlines(): 与这里同等效果
-                # gene_list.append(l.strip())
             gene_list = [l.strip() for l in fr.readlines()]
             if '' in gene_list:
-                gene_list.remove( '')
-
-            #x_df是行为样本名，列为基因名的df 是处理过（1.Remove the invalid samples.   2.Do exp to whole dataframe）的特征矩阵
+                gene_list.remove('')
+            
         for gene in gene_list:
             if gene not in X_df.columns:
                 print('''
                 !!!!!!!!!Warning!!!!!!!!!
                 {} not in {}
                 '''.format(gene, path_feature_df))
-               #过滤出选中的1000个gene
+                
         gene_list = list(filter(lambda x:x in X_df, gene_list))
         # print('Using genes: {}'.format(gene_list))
-        #这里的X_df是选出来的1000个基因的特征dataframe
+        
         X_df = X_df.loc[:, gene_list] 
 #         X_df.to_csv('{}_{}genes'.format(path_feature_df, X_df.shape[1]), sep='\t')   
         
@@ -356,7 +390,7 @@ def generateFeaturesAndLabels(path_feature_df, path_group, path_chosen_genes="",
                 col_ids.append(col_id)
                 cols_names.append(cols_maybe_dup[col_id])
         X_df = X_df.iloc[:, col_ids]
-        # Above is for deduplication. 去重
+        # Above is for deduplication. 
         
         
         # print(X_df.columns)
@@ -368,19 +402,19 @@ def generateFeaturesAndLabels(path_feature_df, path_group, path_chosen_genes="",
     X = X_df
     print('Read matrix with genes and final shape: {}'.format(X.shape))
     # print('head is \n{}'.format(X_df.head().to_csv(sep='\t'))) 
-    if do_normalize:    
+    if do_normalize_after_loc:    
         print('Normalizing (shown only one row): \n{}'.format(sum(X.iloc[0,:])))
-        normalizer = Normalizer(norm='l1')
+        # normalizer = Normalizer(norm='l1')
+        normalizer = eval(do_normalize_after_loc)
+        print('do_normalize_after_loc is {}'.format(normalizer))
         normalizer.fit(X)
         X_tmp = normalizer.transform(X)
-        #df.loc 只能进行标签索引，不能使用整数索引，f.iloc[]只能使用整数索引，不能使用标签索引
         X.loc[:,:] = X_tmp
         print('Normalized as (shown only one row): \n{}'.format(sum(X.iloc[0,:])))
     
     if X.shape[0] > 0:
 #         print('{} loaded as {}x{} matrix'.format(path_feature_df, len(X), len(X[0])))
-        print('{} loaded as {} matrix'.format(path_feature_df, X.shape))
-        if False:print(X)
+        print('{} loaded as {} matrix'.format(path_feature_df, X.shape)) 
     # print('X is \n{}'.format(X))
     
     if return_gene_list:
@@ -391,8 +425,8 @@ def generateFeaturesAndLabels(path_feature_df, path_group, path_chosen_genes="",
 
 def classifyUsingDFAndGroupTxt(path_df, path_group, path_chosen_genes="", training_part_scale=0.75, k_cross_validation=None, V_times_cv=None, which_is_1=None,
                                plot=False, random_state=None, load_predictor=None, load_dict_digit_to_group=None, output_dir=".", **kargs):
-    #groups(list) X(dataframe)
-    X, groups = generateFeaturesAndLabels(path_df, path_group, path_chosen_genes, do_normalize=kargs.get('do_normalize', False), transpose=kargs.get('transpose', False))
+    
+    X, groups = generateFeaturesAndLabels(path_df, path_group, path_chosen_genes, **kargs)
       
     if os.path.exists(load_dict_digit_to_group): 
         dict_digit_to_group = loadPickle(load_dict_digit_to_group)
@@ -418,7 +452,6 @@ def inverseDict(dict_to_reverse):
             raise Exception('Duplicate value while inversing dict! ')
     return dict_reversed
 
-#相当于把标签数字化return converted_group, dict_digit_group
 def convertToDigitalLabel(groups, sort_only=False):
     set_groups = list(set(groups))
     set_groups.sort()
@@ -429,10 +462,10 @@ def convertToDigitalLabel(groups, sort_only=False):
         converted_group = groups
     else:
         converted_group = list(map(lambda x:dict_group_digit[x], groups))
-    #converted_group是把标签转换位数字
+    
     return converted_group, dict_digit_group
 
-#相当于独热编码 return converted_groups, dict_digit_to_group（字典）,数字：group
+    
 def convertToBinaryLabel(groups, which_is_1):
     converted_groups = [1 if g == which_is_1 else 0 for g in groups]
     dict_digit_to_group = {1:which_is_1, 0: 'not ' + which_is_1}
@@ -444,8 +477,6 @@ def writeToFile(string, path, open_method='w'):
     with open(path, open_method) as fr:
         fr.write(str(string))
 
-
-#return specificities_to_return是一个serious，index是cancer， value是 specificities
 def calculateSpecificityFromConfusionMatrix(df_confusion_matrix):
     '''
     From: https://stackoverflow.com/questions/27959467/how-to-find-tp-tn-fp-and-fn-values-from-8x8-confusion-matrix
@@ -456,7 +487,6 @@ def calculateSpecificityFromConfusionMatrix(df_confusion_matrix):
     Specificity = TN/(TN+FP)
     '''
     cancers = df_confusion_matrix.index
-    #index=cacerns 值为NA
     specificities_per_cancer = Series(index=cancers)
     specificities_to_return = Series(index=cancers)
     sample_nums = Series(index=cancers)
@@ -468,13 +498,13 @@ def calculateSpecificityFromConfusionMatrix(df_confusion_matrix):
         FP = df_confusion_matrix.loc[:, cancer].sum() - TP
         FP_sum += FP
         FN = df_confusion_matrix.loc[cancer, :].sum() - TP
-        TN = df_confusion_matrix.loc[:, :].sum().sum() - FP  - TP - FN
+        TN = df_confusion_matrix.loc[:, :].sum().sum() - FP - TP - FN
         TN_sum += TN
         # print(TN)
         # print(TN+FP)
         # print( TN/(TN+FP))
         specificities_per_cancer[cancer] = TN/(TN+FP)
-        #serious是在index下面加一个specificities_to_return['micro avg']
+        
     specificities_to_return = specificities_per_cancer.copy()
     specificities_to_return['micro avg'] = TN_sum/(TN_sum+FP_sum)
     specificities_to_return['macro avg'] = specificities_per_cancer.values.mean()
@@ -483,7 +513,7 @@ def calculateSpecificityFromConfusionMatrix(df_confusion_matrix):
     return specificities_to_return
     
 
-def calculateSpecificity(ground_truth, predictions):
+def calculateSpecificity(ground_truth, predictions): 
     tp, tn, fn, fp = 0.0,0.0,0.0,0.0
     for l,m in enumerate(ground_truth):        
         if m==predictions[l] and m==1:
@@ -500,18 +530,28 @@ def calculateSpecificity(ground_truth, predictions):
         spec = 1
     return spec
 
-def predictionsReport(probas, true_labels, dict_digit_to_group, write_to_disk_prefix=None, write_to_disk_prefix_max_length=WRITE_TO_DISK_PREFIX_MAX_LENGTH, unknown_class_name=None):
-    #得到label的index，因为index都是按顺序排好了的
+def predictionsReport(probas, true_labels, dict_digit_to_group, write_to_disk_prefix=None, \
+    write_to_disk_prefix_max_length=WRITE_TO_DISK_PREFIX_MAX_LENGTH, unknown_class_name=None, 
+    delete_filtered=DELETE_FILTERED): 
     predicted_digit_label = [list(probas.loc[i,:]).index(probas.loc[i,:].max()) for i in probas.index]
-   #根据label的index得到label（）
     predicted_str_label = [dict_digit_to_group[d] for d in predicted_digit_label]
-    #根据最大概率的特征的digit来找到对应的group
+    
     df_to_probas_predicted_and_true_label = probas
     df_to_probas_predicted_and_true_label.rename(columns=dict_digit_to_group, inplace=True)
     df_to_probas_predicted_and_true_label.loc[:, 'predicted_label'] = predicted_str_label
     df_to_probas_predicted_and_true_label.loc[:, 'true_label'] = true_labels
     df_to_probas_predicted_and_true_label.loc[:, 'correct'] = df_to_probas_predicted_and_true_label.apply(lambda x: 1 if x['predicted_label'] == x['true_label'] else 0, axis=1)
     
+    
+    if delete_filtered:
+        print('delete filtered: from \n{} to '.format(df_to_probas_predicted_and_true_label))
+        df_to_probas_predicted_and_true_label = df_to_probas_predicted_and_true_label.loc[df_to_probas_predicted_and_true_label[~(df_to_probas_predicted_and_true_label[unknown_class_name]==1)].index,:]
+        print(df_to_probas_predicted_and_true_label)
+        true_labels = df_to_probas_predicted_and_true_label.loc[:, 'true_label']
+        predicted_str_label = df_to_probas_predicted_and_true_label.loc[:, 'predicted_label'] 
+        probas = df_to_probas_predicted_and_true_label.iloc[:,:-3]
+
+
     try:
         confusion_mat = confusion_matrix(true_labels, predicted_str_label, 
             labels=[dict_digit_to_group[i] for i in range(len(dict_digit_to_group))])
@@ -522,6 +562,8 @@ def predictionsReport(probas, true_labels, dict_digit_to_group, write_to_disk_pr
         print('confusion_matrix generation failed due to {}'.format(e))
         str_confusion_report = str(e)
     
+    
+
     if write_to_disk_prefix: 
         if len(os.path.basename(write_to_disk_prefix)) > write_to_disk_prefix_max_length:
             os.path.join(os.path.dirname(write_to_disk_prefix), os.path.basename(write_to_disk_prefix)[len(write_to_disk_prefix)-write_to_disk_prefix_max_length:])
@@ -533,16 +575,16 @@ def predictionsReport(probas, true_labels, dict_digit_to_group, write_to_disk_pr
             dict_group_to_digit = inverseDict(dict_digit_to_group)
             true_int_labels = [dict_group_to_digit[s] for s in true_labels]
             #auc_macro, auc_micro = plotRoc(true_int_labels, probas, dict_digit_to_group, '{}.ROC.png'.format(write_to_disk_prefix))
-            aucs, specs = plotRoc(true_int_labels, probas, dict_digit_to_group, '{}.ROC.png'.format(write_to_disk_prefix),unknown_class_name=unknown_class_name) 
+            aucs, specs = plotRoc(true_int_labels, probas, dict_digit_to_group, \
+                '{}.ROC.png'.format(write_to_disk_prefix),unknown_class_name=unknown_class_name) 
         except Exception as e:
             print("Plotting err: {}\nROC plot failed. Is there NA in the true labels? ".format(e))
             
         print('printing to file {}'.format(write_to_disk_prefix+'.probas.xls'))
         
-        str_probas = df_to_probas_predicted_and_true_label.to_csv(sep='\t')
+        str_probas = df_to_probas_predicted_and_true_label.to_csv(sep='\t') 
         str_classification_report, df_report, accuracy = formated_classification_report(true_labels, predicted_str_label)
         try:
-            #specificities_to_return, micro avg ,macro avg ,weighted avg
             specificities = calculateSpecificityFromConfusionMatrix(df_confusion)
             df_report['specificity'] = specificities
         except:
@@ -556,11 +598,14 @@ def predictionsReport(probas, true_labels, dict_digit_to_group, write_to_disk_pr
             df_report.loc['micro avg', 'auc'] = aucs['micro']
             df_report.loc['macro avg', 'auc'] = aucs['macro']
         
-        # print(df_report)
-        df_report.loc[:, 'support'] = df_report.loc[:,'support'].astype('int')
+        try:
+            df_report.loc[:, 'support'] = df_report.loc[:,'support'].astype('int') 
+        except:
+            print('support astype(int) failed: \n{}'.format(df_report))
         str_classification_report = df_report.to_csv(sep='\t') + '\naccuracy\t{}\n'.format(accuracy)
         # Not real ['accuracy', 'precision'], just for putting the accuracy under the report table. 
         df_report.loc['accuracy', 'precision'] = accuracy
+        print('writing to {}*'.format(write_to_disk_prefix))
         writeToFile(str_probas, write_to_disk_prefix+'.probas.xls', 'w') 
         writeToFile(str_classification_report, write_to_disk_prefix+'.report.xls', 'w') 
         writeToFile(str_confusion_report, write_to_disk_prefix+'.confusion.xls', 'w') 
@@ -587,7 +632,6 @@ def formated_classification_report(test_y_list, predicted_str_label, required_fi
     # df_report = pd.read_csv(io_tmp, sep=',', index_col=0)
     # print('after converting to df: \n{}'.format(df_report))
     accuracy = accuracy_score(test_y_list, predicted_str_label)
-    #'\t张三\tlisi\twangwu\r\na\t67\t65\t80\r\nb\t68\t82\t69\r\nc\t75\t63\t89\r\nd\t78\t90\t74\r\n'   str_report是string类型
     str_report = df_report.to_csv(sep='\t')
     str_report += '\naccuracy\t{}\n'.format(accuracy)
     #confusion_mat = confusion_matrix(test_y_list, predicted_str_label)
@@ -596,12 +640,12 @@ def formated_classification_report(test_y_list, predicted_str_label, required_fi
     return str_report, df_report, accuracy
 
 
-# ���庯�� plot_learning_curve ����ѧϰ����
+# plot_learning_curve  
 def plot_learning_curve(estimator, title, X, y, path_output, cv=10, train_sizes=np.linspace(.1, 1.0, 5)): 
     plt.figure()
-    plt.title(title)  # ����ͼ�� title
-    plt.xlabel('Training examples')  # ������
-    plt.ylabel('Score')  # ������
+    plt.title(title)  
+    plt.xlabel('Training examples')  
+    plt.ylabel('Score')   
     train_sizes, train_scores, test_scores = learning_curve(estimator, X, y, cv=cv, train_sizes=train_sizes)
     train_scores_mean = np.mean(train_scores, axis=1) 
     train_scores_std = np.std(train_scores, axis=1) 
@@ -609,12 +653,13 @@ def plot_learning_curve(estimator, title, X, y, path_output, cv=10, train_sizes=
     test_scores_std = np.std(test_scores, axis=1)
     plt.grid() 
 
-    plt.fill_between(train_sizes, train_scores_mean - train_scores_std, train_scores_mean + train_scores_std, alpha=0.1, color='g')  # ������ɫ
+    plt.fill_between(train_sizes, train_scores_mean - train_scores_std, train_scores_mean + train_scores_std, alpha=0.1, color='g') 
     plt.fill_between(train_sizes, test_scores_mean - test_scores_std, test_scores_mean + test_scores_std, alpha=0.1, color='r')
-    plt.plot(train_sizes, train_scores_mean, 'o-', color='g', label='traning score')  # ����ѵ����������
-    plt.plot(train_sizes, test_scores_mean, 'o-', color='r', label='testing score')  # ���Ʋ��Ծ�������
+    plt.plot(train_sizes, train_scores_mean, 'o-', color='g', label='traning score')  
+    plt.plot(train_sizes, test_scores_mean, 'o-', color='r', label='testing score') 
     plt.legend(loc='best')
     plt.savefig(path_output)
+
 
 def classifyUsingSklearn(X, y_list, training_part_scale=0.75, k_cross_validation=None, V_times_cv=None, dict_digit_to_group=None,
                      featurer=False, polynomial=1, interaction_only=False, plot=False, random_state=None,
@@ -633,7 +678,7 @@ def classifyUsingSklearn(X, y_list, training_part_scale=0.75, k_cross_validation
     '''
     
     classification_method = kargs['classification_method']
-    #特征数
+    
     output_prefix_featurer = 'genenum_{}'.format(X.shape[1])
     # savePickle(dict_digit_to_group, '{}.dict_digit_to_group'.format(classification_method))
     dict_group_to_digit =  inverseDict(dict_digit_to_group)
@@ -650,7 +695,6 @@ def classifyUsingSklearn(X, y_list, training_part_scale=0.75, k_cross_validation
     
     if featurer:
         if isinstance(featurer, str):
-            #如果是路径就加载
             featurer = joblib.load(featurer)
         else:
             featurer = featurer
@@ -690,7 +734,9 @@ def classifyUsingSklearn(X, y_list, training_part_scale=0.75, k_cross_validation
 #     print(X)
 #     print(y_list)
     if load_predictor:
-        output_prefix_predictor = str(load_predictor).replace('/', '')
+        
+        # output_prefix_predictor = str(load_predictor).replace('/', '').lstrip('.')
+        output_prefix_predictor = str(load_predictor).split('/')[-1]
         output_prefix_predictor = os.path.join(output_dir, output_prefix_predictor)
         
         if isinstance(load_predictor, str):
@@ -716,7 +762,7 @@ def classifyUsingSklearn(X, y_list, training_part_scale=0.75, k_cross_validation
         else:
             output_prefix_predictor += '-all_genes'
         
-        output_prefix_predictor = '{}_rand_state_{}'.format(output_prefix_predictor, random_state)
+        output_prefix_predictor = '{}Rand{}'.format(output_prefix_predictor, random_state)
         
         output_prefix_predictor = os.path.join(output_dir, output_prefix_predictor)
         
@@ -745,7 +791,7 @@ def classifyUsingSklearn(X, y_list, training_part_scale=0.75, k_cross_validation
         # Test. 
         # if do_normalize:
             # test_X = normalizer.transform(test_X)
-        #predicted的形式是index为样本名，值为各个特征的概率值
+        
         predicted = predictor.predict_proba(test_X)
         predicted = df(predicted)
         predicted.index = test_X.index
@@ -756,8 +802,42 @@ def classifyUsingSklearn(X, y_list, training_part_scale=0.75, k_cross_validation
         predicted, dict_digit_to_group, dict_group_to_digit = filterLowConf(predicted, minimum_val_for_prediction, minimum_val_for_difference, unknown_class_name, dict_group_to_digit)
         
         print('len of dict_group_to_digit after filterLowConf is {}'.format(len(dict_group_to_digit)))
-
-        predictionsReport(predicted, test_y_list, dict_digit_to_group, write_to_disk_prefix=output_prefix_predictor, unknown_class_name=unknown_class_name)
+        # savePickle(test_y_list, '{}.true_label'.format(output_prefix_predictor))
+        # savePickle(predicted, '{}.predicted.result'.format(output_prefix_predictor))
+        # print('predicted: \n{}'.format(predicted))
+        # print('test_y_list: \n{}'.format(test_y_list))
+        # print('Converting to int: ')
+        # test_y_list_int = [dict_group_to_digit[l] for l in test_y_list]
+        # print('Converted: {}'.format(test_y_list_int))
+        # Plot ROC. 
+        # Need to modify!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
+#         predicted = predicted[:,1]
+#         test_y_list = np.array([1,1,1])
+        # print(test_y_list_int, predicted, '{}.ROC.png'.format(output_prefix_predictor))        
+        # auc_macro, auc_micro = plotRoc(test_y_list_int, predicted, dict_digit_to_group, '{}.ROC.png'.format(output_prefix_predictor))
+        
+        # print('test_y_list_int: \n{}'.format(test_y_list_int))
+        
+        # predicted_int_label = np.argmax(predicted, 1)
+        # print(predicted_int_label)        
+        # predicted_str_label = [dict_digit_to_group[p] for p in predicted_int_label]
+        # print('predicted:\n{}'+str(predicted_str_label))
+        # writeToFile(str(predicted_str_label), '{}.predicted_label.txt'.format(output_prefix_predictor))
+        # writeToFile(str(test_y_list), '{}.true_label.txt'.format(output_prefix_predictor))
+        
+        # df_to_probas_predicted_and_true_label = df(predicted)
+        # df_to_probas_predicted_and_true_label.rename(dict_digit_to_group)
+        # df_to_probas_predicted_and_true_label.loc[:, 'predicted_label'] = predicted_str_label
+        # df_to_probas_predicted_and_true_label.loc[:, 'true_label'] = test_y_list
+        # df_to_probas_predicted_and_true_label.to_csv( '{}.predict.xls'.format(output_prefix_predictor), sep='\t')
+        
+        # print('true')
+        # test_y_list = list(test_y_list)
+        # print(test_y_list)
+        # str_report, accuracy = formated_classification_report(test_y_list, predicted_str_label)
+        #accuracy, str_probas, str_classification_report, str_confusion_report = \
+        predictionsReport(predicted, test_y_list, dict_digit_to_group, write_to_disk_prefix=output_prefix_predictor, \
+            unknown_class_name=unknown_class_name)
 
         
     if plot:
@@ -794,7 +874,6 @@ def filterLowConf(probas, minimum_val_for_prediction, minimum_val_for_difference
     
     # Remove those with max below minimum_val_for_prediction. 
     # low_conf_rows = np.max(probas, axis=1) < minimum_val_for_prediction
-    #axis=1表示行，
     low_conf_rows = probas[probas.max(axis=1) < minimum_val_for_prediction].index
     
     print(low_conf_rows)
@@ -812,6 +891,10 @@ def filterLowConf(probas, minimum_val_for_prediction, minimum_val_for_difference
         
     # probas[low_conf_rows] = to_be_set
     dict_digit_to_group = inverseDict(dict_group_to_digit)
+
+    # if delete_filtered:
+    #     probas = probas.loc[probas[~(probas[unknown_class_name]==1)].index,:]
+    
     return probas, dict_digit_to_group, dict_group_to_digit
     
 def plotAxisAndSave(outpath, lw=1, title='ROC for Cancers', plot_legend=False, fontsize=27):
@@ -905,11 +988,11 @@ def plotRoc(y_true, y_predict, group_dict, outpath, roc_size=(9,8), unknown_clas
         
         
     print('specs:\n{}'.format(specs))
-    # Compute micro-average ROC curve and ROC area����������
+    # Compute micro-average ROC curve and ROC area 
     fpr["micro"], tpr["micro"], _ = roc_curve(y_true.ravel(), y_predict.ravel())
     roc_auc["micro"] = auc(fpr["micro"], tpr["micro"])
     print('roc_auc["micro"] {} '.format(roc_auc["micro"]))
-    # Compute macro-average ROC curve and ROC area������һ��
+    # Compute macro-average ROC curve and ROC area 
     # First aggregate all false positive rates
     all_fpr = np.unique(np.concatenate([fpr[i] for i in range(n_classes)]))
     # Then interpolate all ROC curves at this points
@@ -1035,11 +1118,11 @@ def plotRocOld(y_true, y_predict, outpath):
         fpr[i], tpr[i], _ = roc_curve(y_true[:, i], y_predict[:, i])
         roc_auc[i] = auc(fpr[i], tpr[i])
     
-    # Compute micro-average ROC curve and ROC area����������
+    # Compute micro-average ROC curve and ROC area 
     fpr["micro"], tpr["micro"], _ = roc_curve(y_true.ravel(), y_predict.ravel())
     roc_auc["micro"] = auc(fpr["micro"], tpr["micro"])
     
-    # Compute macro-average ROC curve and ROC area������һ��
+    # Compute macro-average ROC curve and ROC area
     # First aggregate all false positive rates
     all_fpr = np.unique(np.concatenate([fpr[i] for i in range(n_classes)]))
     # Then interpolate all ROC curves at this points
@@ -1084,7 +1167,6 @@ def plotRocOld(y_true, y_predict, outpath):
 def meanAndSdForDataFrames(df_reports):
     mats = []
     result_df = None
-    #data_df是列名
     for data_df in df_reports: 
         result_df = data_df
         mats.append(data_df.replace('', 0).values)
@@ -1110,8 +1192,8 @@ def vTimesCrossValidation(X, y_lsit, predictor, output_prefix_predictor, k_cross
         result = crossValidation(X, y_lsit, predictor, output_prefix_predictor, k_cross_validation, random_state, **kargs)
         return str(round(result, KEEP_DECIMAL))
     else:
-        path_cvs_mean_output = '{}.{}_times_{}_fold_cross_validations_mean.xls'.format(output_prefix_predictor, V_times_cv, k_cross_validation)
-        path_cvs_sd_output = '{}.{}_times_{}_fold_cross_validations_sd.xls'.format(output_prefix_predictor, V_times_cv, k_cross_validation)
+        path_cvs_mean_output = '{}.{}Times{}FoldCrossValMean.xls'.format(output_prefix_predictor, V_times_cv, k_cross_validation)
+        path_cvs_sd_output = '{}.{}Times{}FoldCrossValSd.xls'.format(output_prefix_predictor, V_times_cv, k_cross_validation)
         print('Performing {} cross validations'.format(V_times_cv))
     
         # Re-generate several numbers for the crossValidation seeds. 
@@ -1120,7 +1202,7 @@ def vTimesCrossValidation(X, y_lsit, predictor, output_prefix_predictor, k_cross
         random_seeds = random.sample(range(1, 10000), V_times_cv)
         for rs in random_seeds:
 #             print('Performing cross validation with random state: {}'.format(rs))
-            result = crossValidation(X, y_lsit, predictor, output_prefix_predictor, k_cross_validation, random_state=rs, output_path='{}.{}times{}cv.randseed_{}.txt'.format(output_prefix_predictor, V_times_cv, k_cross_validation, rs), **kargs)
+            result = crossValidation(X, y_lsit, predictor, output_prefix_predictor, k_cross_validation, random_state=rs, output_path='{}.{}Times{}CV.Rand{}.txt'.format(output_prefix_predictor, V_times_cv, k_cross_validation, rs), **kargs)
             results.append(result)
         # cvs stands for cross validations. 
         
@@ -1182,7 +1264,7 @@ def crossValidation(X, y_list, predictor, output_prefix_predictor, k_cross_valid
     '''
     
     if output_path is None: 
-        path_cv_output = '{}.{}_fold_cross_validation_randseed{}.txt'.format(output_prefix_predictor, k_cross_validation, random_state)
+        path_cv_output = '{}.{}FoldCrossValRand{}.txt'.format(output_prefix_predictor, k_cross_validation, random_state)
     else:
         path_cv_output = output_path
     print('writing to {}'.format(path_cv_output))
@@ -1219,39 +1301,39 @@ def crossValidation(X, y_list, predictor, output_prefix_predictor, k_cross_valid
 #     plt.savefig(output_path)
 
 
-def plot2d(X, y_list):
-    # Plot
-    # color = ['black' if c == 0 else 'red' for c in y_list]
-    color = []
-    for y in y_list:
-        if y == 0:
-            color.append('black')
-        elif y == 1:
-            color.append('red')
-        elif y == 2:
-            color.append('blue')
-        elif y == 3:
-            color.append('green')
-        else:
-            color.append('grey') 
+# def plot2d(X, y_list):
+#     # Plot
+#     # color = ['black' if c == 0 else 'red' for c in y_list]
+#     color = []
+#     for y in y_list:
+#         if y == 0:
+#             color.append('black')
+#         elif y == 1:
+#             color.append('red')
+#         elif y == 2:
+#             color.append('blue')
+#         elif y == 3:
+#             color.append('green')
+#         else:
+#             color.append('grey') 
     
-    plt.scatter(X[:, 0], X[:, 1], c=color)
+#     plt.scatter(X[:, 0], X[:, 1], c=color)
     
-    a = -w[0] / w[1]
-    xx = np.linspace(-2.5, 2.5)
-    yy = a * xx - (predictor.intercept_[0]) / w[1]
+#     a = -w[0] / w[1]
+#     xx = np.linspace(-2.5, 2.5)
+#     yy = a * xx - (predictor.intercept_[0]) / w[1]
         
-    # Plot the hyperplane
-    plt.plot(xx, yy) 
-    #    plt.show()
-    plt.savefig('./a.png')
+#     # Plot the hyperplane
+#     plt.plot(xx, yy) 
+#     #    plt.show()
+#     plt.savefig('./a.png')
         
         
 def readGroupInfo(names, file_group, file_group_header=None): 
     groups = ['NA'] * len(names)
     if file_group and os.path.exists(file_group): 
         group_df = pd.read_csv(file_group, header=file_group_header, sep='\t', index_col=0)
-        # if name in group_df else 'unknown' name就是donor_id，groups是label，先初始化groups空，
+        # if name in group_df else 'unknown' 
         for i in range(len(names)):
             name = names[i]
             try:
@@ -1292,7 +1374,7 @@ def mArgParsing(description='this is a description', additional_arg_list=None):
 #     requiredargs = parser.add_argument_group('required named arguments')
     parser.add_argument('-t', '--path_feature_df', dest="path_feature_df", default=None, help="Path of the DataFrame (Matrix) for training. ", nargs=1, action="store", type=str)
     parser.add_argument('-G', '--path_group', dest="path_group", default=None, help="Path of the sample-group table. ", nargs=1, action="store", type=str)
-    parser.add_argument('-m', '--method', dest="classification_method", default='svm', help="Choices: svm knn logistic rf dnn", nargs=1, action="store", type=str)
+    parser.add_argument('-m', '--method', dest="classification_method", default='svm', help="Choices: {}".format(' '.join(PredictorClasses.keys())), nargs=1, action="store", type=str)
     parser.add_argument('-d', '--decision_function_shape', dest="decision_function_shape", default='ovr', help="Choices: ovr (1 vs rest) ovo (1 vs 1)", nargs=1, action="store", type=str)
     parser.add_argument('-k', '--kernel', dest="kernel", default='linear', help="Choices: linear rbf poly sigmoid precomputed", nargs=1, action="store", type=str)
     parser.add_argument('-n', '--n_neighbors', dest="n_neighbors", default=5, help="n_neighbors for knn, or n_estimators for random forest", nargs=1, action="store", type=int)
@@ -1316,12 +1398,14 @@ def mArgParsing(description='this is a description', additional_arg_list=None):
     parser.add_argument('-F', '--minimum_val_for_difference', dest="minimum_val_for_difference", default=-1, help="Predict a class only if its maximum value is larger than others at this value. Else classify it as Unknown. (Must come together with '-U' parameter. )", nargs=1, action="store", type=float)
     # parser.add_argument('-U', '--unknown_class_name', dest="unknown_class_name", default="LOW_CONFIDENCE", help="When the max value is as not large enough, classify to this class. Must be in the previously existing cancer types. ", nargs=1, action="store", type=str)
     parser.add_argument('-S', '--save_predictor', dest="save_predictor", default="True", help="Save predictor instances in the train-test mode. ", nargs=1, action="store", type=str)
-    parser.add_argument('-z', '--do_normalize', dest="do_normalize", default="True", help="Do normalize in the selected genes. ", nargs=1, action="store", type=str)
+    parser.add_argument('-y', '--do_normalize', dest="do_normalize", default="Normalizer(norm='l1')", help="Normalizer for python. Write in the format that python can eval, \
+        such as \"Normalizer(norm='l1')\" or \"QuantileTransformer(output_distribution='normal', n_quantiles=100000)\" or \"AsIs()\" for not doing normalization. ", nargs=1, action="store", type=str)
+    parser.add_argument('-z', '--do_normalize_after_loc', dest="do_normalize_after_loc", default="Normalizer(norm='l1')", help="Normalizer for python. Write in the format that python can eval, \
+        such as \"Normalizer(norm='l1')\" or \"QuantileTransformer(output_distribution='normal', n_quantiles=100000)\" or \"AsIs()\" for not doing normalization. ", nargs=1, action="store", type=str)
     parser.add_argument('-Z', '--other_parameters', dest="other_parameters", default="{}", help="For inputting other parameters not shown above. \n\
-                        Must be written as a "" quoted python dict and \'\' quoted string.", nargs=1, action="store", type=str)
+                        Must be written as a "" quoted python dict and \'\' quoted string. E.g.: -Z \'{\"optionA\":\"valueA\"}\'", nargs=1, action="store", type=str)
     parser.add_argument('-o', '--output_dir', dest="output_dir", default=".", help="Specify output directory. ", nargs=1, action="store", type=str)
     parser.add_argument('-R', '--transpose', dest="transpose", default="False", help="Transpose the input feature matrix or not. ", nargs=1, action="store", type=str)
-    
     
     
     if additional_arg_list is not None:
@@ -1346,7 +1430,8 @@ def mArgParsing(description='this is a description', additional_arg_list=None):
      # n_neighbors and desicion_function_shape works as different args in different methods. 
     args.n_estimators = args.n_neighbors
     args.save_predictor = eval(l1(args.save_predictor))
-    args.do_normalize = eval(l1(args.do_normalize))
+    args.do_normalize = l1(args.do_normalize)
+    args.do_normalize_after_loc = l1(args.do_normalize_after_loc)
     args.multi_class = args.decision_function_shape
     args.other_parameters = eval(l1(args.other_parameters))
     args.transpose = eval(l1(args.transpose))
@@ -1394,6 +1479,7 @@ if __name__ == '__main__':
         unknown_class_name=l1(args.unknown_class_name),
         save_predictor=l1(args.save_predictor),
         do_normalize=l1(args.do_normalize),
+        do_normalize_after_loc=l1(args.do_normalize_after_loc),
         which_is_1=None,
         plot=False, 
         output_dir=l1(args.output_dir),
